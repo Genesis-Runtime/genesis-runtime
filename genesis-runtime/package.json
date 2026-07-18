@@ -8,8 +8,12 @@
     "node": ">=18"
   },
   "main": "server.js",
+  "bin": {
+    "genesis": "bin/genesis.js"
+  },
   "scripts": {
     "start": "node server.js",
+    "genesis": "node bin/genesis.js",
     "test": "node --test lib/*.test.js"
   },
   "dependencies": {

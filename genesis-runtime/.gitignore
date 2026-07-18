@@ -1,0 +1,7 @@
+node_modules/
+runtime-data/
+
+# Plugin code installed by `genesis create` / `genesis install profile` — fetched from a
+# catalog, not hand-authored. Delete this to force a clean re-install, or remove this ignore
+# rule (and `git add -f`) if you want to version your customized copy.
+plugins/_catalog/

@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadActiveProfile, getActiveProfile } from "./lib/profile-manager.js";
+import { loadActiveProfile, getActiveProfile, defaultPreferencePath } from "./lib/profile-manager.js";
 import { createAdminSecurity } from "./lib/admin-security.js";
 import { createHttpHooks } from "./lib/http-hooks.js";
 import { initializePluginManager } from "./lib/plugin-loader.js";
@@ -31,7 +31,12 @@ async function main() {
   await fs.mkdir(pluginRuntimeRoot, { recursive: true });
   await fs.mkdir(path.join(rootDir, "plugins"), { recursive: true });
 
-  const profile = await loadActiveProfile({ fs, rootDir, logger: console });
+  const profile = await loadActiveProfile({
+    fs,
+    rootDir,
+    preferencePath: defaultPreferencePath(rootDir),
+    logger: console
+  });
 
   const app = express();
   app.use(express.json({ limit: "5mb" }));

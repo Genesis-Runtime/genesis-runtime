@@ -12,6 +12,10 @@ const REQUIRED_PROFILE_FIELDS = [
   "runtime"
 ];
 
+export function defaultPreferencePath(rootDir = process.cwd()) {
+  return path.join(rootDir, "runtime-data", "profile-selection.json");
+}
+
 let activeProfile = null;
 let activeProfileSelection = {
   requestedProfileId: "default",
@@ -133,6 +137,10 @@ async function readProfileSelection(fs, preferencePath = "") {
   } catch {
     return "";
   }
+}
+
+export async function readStoredProfileSelection({ fs, preferencePath = "" } = {}) {
+  return readProfileSelection(fs, preferencePath);
 }
 
 export async function saveProfileSelection({

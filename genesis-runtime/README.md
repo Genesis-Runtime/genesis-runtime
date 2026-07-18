@@ -51,17 +51,25 @@ independently-developed version with its own `lib/`/`public/`) declare `id: "mai
 whichever registers second wins on conflicting routes. Recommend deleting the flat
 `mail-plugin.js` copy at the catalog root now that the richer `mail/` version exists.
 
-## Starter profiles
+## Profiles are first-class
 
-Five profiles in `profiles/`, all validated against the 46-plugin catalog at
+Profiles aren't sample config — they're the unit you install, activate, and fork. Each one is a
+`profiles/<id>.json` file plus (once installed) the actual plugin source it enables, copied
+locally into `plugins/_catalog/` where you're expected to edit it. See "CLI" below for the
+`genesis` command that drives this.
+
+Eight profiles ship in `profiles/`, all validated against the 46-plugin catalog at
 `E:\AI\genesis-plugins` (boots clean, 0 load errors):
 
-| Profile | `GENESIS_PROFILE=` | Enables |
+| Profile | `genesis create <id>` | Enables |
 |---|---|---|
+| Default | `default` | nothing — baseline used as the merge base for every other profile |
 | Minimal | `minimal` | `secrets`, `model-provider` only — verify the runtime boots before adding anything |
-| Personal Assistant | `personal-assistant` | agent-runtime, memory, mail, calendar, voice/avatar, presence, home automation (Home Assistant/Matter/MQTT), skills, philosophy/personality — no dev or business tooling |
+| Home | `home` | agent-runtime, memory, mail, calendar, voice/avatar, presence, home automation (Home Assistant/Matter/MQTT), skills, philosophy/personality — no dev or business tooling |
 | Developer | `developer` | agent-runtime, sandbox, workspace, code-review, deploy, github, qa, security-audit, vscode bridge, sprint/design tooling |
-| 3D Printing Ballarat | `3dpb-business` | agent-runtime, mail, calendar, the `3dpb-hub` business API bridge, finance, payments, wordpress, social-media-manager, projects — successor to `genesis-core`'s old `printshop.json` |
+| Startup | `startup` | agent-runtime, finance, projects, sprint, mail/calendar, github, social-media-manager, governance, information-agent — running-the-business tooling, not writing-the-code tooling |
+| Ghostwriter | `ghostwriter` | personality/personality-clone, philosophy, projects (writing fragments), retrieval, social-media-manager — persona and content work |
+| Watchtower | `watchtower` | security, security-audit, governance, qa, code-review, deploy, developer-tools, browser, information-agent — security/CI/external-monitoring watch |
 | Full Catalog | `full` | everything — for integration testing, not a real deployment (broad tool/capability surface) |
 
 Each profile's `disabledPlugins` list is the full-catalog complement of its `enabledPlugins`
@@ -71,6 +79,65 @@ stops its routes from mounting and hides it from the enabled-plugin list, but it
 runs and its capabilities stay registered (that's `plugin-system.js` behavior, not
 profile-specific) — a fully inert "disabled" plugin isn't something the current plugin host
 guarantees.
+
+## CLI
+
+`bin/genesis.js` (run as `node bin/genesis.js`, `npm run genesis`, or `genesis` once linked/
+installed) turns "pick a profile" into an actual install step instead of hand-editing
+`GENESIS_PLUGIN_DIR`:
+
+```
+genesis list                          # available profiles, with the active one marked
+genesis create <profile>              # copy that profile's plugins from the catalog, then activate it
+genesis install profile <profile>     # same thing — alias, matches "install" as a verb
+genesis use <profile>                 # activate a profile without touching plugins/ (they're already installed)
+genesis new <profile> [--from <id>]   # scaffold profiles/<profile>.json from an existing profile, to customize
+genesis catalog [--catalog <path>]    # inspect what a catalog resolves to, without installing anything
+```
+
+### Where plugins come from
+
+Each plugin lives in its own git repo — `create` / `install profile` shallow-clone one per plugin
+straight into `plugins/_catalog/<id>/` (a real checkout, not a copy, so a future `git pull` there
+keeps working). That's the default and intended transport; a local catalog directory is also
+fully supported, as an explicit fallback for plugins that aren't published yet, or that never
+will be (private/local-only plugins).
+
+Per plugin, the source is resolved in this order:
+
+1. `profile.pluginSources["<id>"]` — a per-profile override/pin, checked first
+2. `profiles/plugin-sources.json["<id>"]` — a shared registry reused across every profile
+3. `--catalog <path>` (or `GENESIS_PLUGIN_CATALOG` / `GENESIS_PLUGIN_DIR`) — a local dev catalog
+   directory, used only for plugins with no registered source above
+
+A registry or per-profile entry is either a bare git URL (optionally `"<url>#<ref>"`), or an
+explicit object:
+
+```json
+{
+  "mail": "https://github.com/org/genesis-plugin-mail.git#main",
+  "internal-tool": { "type": "local", "path": "E:\\AI\\genesis-plugins\\internal-tool" }
+}
+```
+
+Pass `--source git` or `--source local` to force one strategy for every plugin in the install
+(e.g. to confirm nothing silently falls back to a local catalog).
+
+Local-catalog installs are copied — not symlinked — into `plugins/_catalog/`, following each
+plugin's actual local import graph (so two plugins sharing a directory, like
+`iot-matter`/`iot-mqtt`, don't drag each other in) plus its `public/`/`vendor/` asset folders when
+it owns them outright. Installs over ~25MB from a local catalog (e.g. `multilingual-voice`'s
+bundled whisper/ffmpeg binaries) require `--yes` to proceed, since that's easy to trigger by
+accident via a profile that just lists the plugin id.
+
+Either way, a re-run leaves files/checkouts that already exist alone, so hand-edits under
+`plugins/_catalog/` survive; pass `--force` to force a fresh clone/copy. Bare npm imports a
+plugin needs are reported, not auto-installed — add them to `package.json` yourself.
+
+Once a profile is active (`create`/`install profile`/`use` all persist the choice to
+`runtime-data/profile-selection.json`), it stays active across restarts without needing
+`GENESIS_PROFILE` set — that env var still works and takes priority, useful for one-off runs
+against a profile you haven't switched to.
 
 ## Identity notes
 
