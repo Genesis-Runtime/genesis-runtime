@@ -2,7 +2,7 @@
 // server/observer-core-state.js (the rest of that file is Nova-specific default-state
 // factories and JSON schemas that don't belong in Genesis core). Kept as a standalone
 // module because it matches the filename externally developed plugins (e.g. the
-// "projects" plugin in E:\AI\genesis-plugins) import by relative path.
+// "projects" plugin in the genesis-plugins catalog) import by relative path.
 
 export function normalizeProjectsConfigForBootstrap(configured = {}) {
   const source = configured && typeof configured === "object" ? configured : {};

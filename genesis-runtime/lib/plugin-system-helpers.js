@@ -1,6 +1,6 @@
 import { normalizePluginId, normalizePriority } from "../observer-compat/server/plugin-manifest.js";
 
-export const CORE_PLUGIN_API_VERSION = "1.4.0";
+export const CORE_PLUGIN_API_VERSION = "1.5.0";
 export const DEFAULT_PLUGIN_HOOK_TIMEOUT_MS = 12000;
 
 export { normalizePluginId, normalizePriority };

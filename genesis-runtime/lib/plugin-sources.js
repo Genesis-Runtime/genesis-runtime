@@ -12,7 +12,7 @@ import path from "node:path";
  *
  * A source entry is either a bare git URL string (optionally "<url>#<ref>"), or an object:
  *   { "type": "git", "url": "https://github.com/org/genesis-plugin-mail.git", "ref": "main" }
- *   { "type": "local", "path": "E:\\AI\\genesis-plugins\\mail" }
+ *   { "type": "local", "path": "/path/to/genesis-plugins/mail" }
  */
 
 export async function loadPluginSourceRegistry({ fs, rootDir, pathModule = path }) {

@@ -1,7 +1,7 @@
 {
   "id": "full",
   "name": "Full Catalog",
-  "description": "Every plugin in E:AIgenesis-plugins enabled at once. Useful for integration testing, not recommended as a real deployment profile (broad tool/capability surface, higher risk).",
+  "description": "Every plugin in the genesis-plugins catalog enabled at once. Useful for integration testing, not recommended as a real deployment profile (broad tool/capability surface, higher risk).",
   "enabledPlugins": [
     "3dpb-hub",
     "agent-runtime",

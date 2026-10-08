@@ -114,7 +114,10 @@ async function main() {
     for (const client of sseClients) {
       client.end();
     }
-    server.close(() => process.exit(0));
+    server.close(async () => {
+      await pluginManager.shutdown("genesis-server-shutdown");
+      process.exit(0);
+    });
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));

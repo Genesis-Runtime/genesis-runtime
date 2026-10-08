@@ -48,7 +48,25 @@ export function normalizePluginManifest(manifest = {}) {
       isolation: String(manifest?.security?.isolation || "inprocess").trim().toLowerCase() === "process"
         ? "process"
         : "inprocess"
-    }
+    },
+    topics: normalizeManifestTopics(manifest?.topics)
+  };
+}
+
+// What a plugin is about, declared by the plugin (core API 1.5.0): subjects,
+// services and platforms it covers (keywords), and requests it serves
+// (examples). A host reads them to decide when to offer the plugin's tools;
+// they grant nothing.
+export const MAX_TOPIC_KEYWORDS = 24;
+export const MAX_TOPIC_EXAMPLES = 12;
+
+export function normalizeManifestTopics(topics = {}) {
+  const strings = (value, limit, length) => [...new Set((Array.isArray(value) ? value : [])
+    .map((entry) => String(entry ?? "").replace(/\s+/g, " ").trim().slice(0, length))
+    .filter(Boolean))].slice(0, limit);
+  return {
+    keywords: strings(topics?.keywords, MAX_TOPIC_KEYWORDS, 60),
+    examples: strings(topics?.examples, MAX_TOPIC_EXAMPLES, 200)
   };
 }
 

@@ -38,6 +38,7 @@ export function createNoopPluginManager({ app = null, runtimeRoot = "", loadErro
     runHook: async (_name = "", payload = undefined) => payload,
     setActiveProfile: () => {},
     setRuntimeContext: () => {},
+    shutdown: async () => {},
     use: () => {}
   };
 }
@@ -68,13 +69,13 @@ function parsePluginDirectoryEnv(value = "", pathModule) {
     .map((entry) => pathModule.resolve(entry));
 }
 
-function pluginDirectoryCandidates({ pathModule, pluginRuntimeRoot, rootDir }) {
+function pluginDirectoryCandidates({ pathModule, pluginRuntimeRoot, rootDir, pluginDirectories = [] }) {
   const defaultDir = pathModule.join(rootDir, "plugins");
   const runtimeDir = pathModule.join(pluginRuntimeRoot, "modules");
   const envDirs = parsePluginDirectoryEnv(process.env.GENESIS_PLUGIN_DIR || "", pathModule);
   const unique = new Set();
   const ordered = [];
-  for (const candidate of [defaultDir, runtimeDir, ...envDirs]) {
+  for (const candidate of [defaultDir, runtimeDir, ...envDirs, ...(Array.isArray(pluginDirectories) ? pluginDirectories : [])]) {
     const normalized = String(candidate || "").trim();
     if (!normalized || unique.has(normalized)) {
       continue;
@@ -91,7 +92,7 @@ function normalizePluginImportPolicyMode(value = "", fallback = "allowlist") {
     : fallback;
 }
 
-async function loadPluginImportTrustPolicy({ fs, pathModule, pluginRuntimeRoot }) {
+async function loadPluginImportTrustPolicy({ fs, pathModule, pluginRuntimeRoot, modeOverride = "" }) {
   const policyPath = pathModule.join(pluginRuntimeRoot, "plugin-trust.json");
   let mode = normalizePluginImportPolicyMode(process.env.GENESIS_EXTERNAL_PLUGIN_IMPORT_MODE || "", "allowlist");
   let allowlist = {};
@@ -104,6 +105,9 @@ async function loadPluginImportTrustPolicy({ fs, pathModule, pluginRuntimeRoot }
       : {};
   } catch {
     // Default external plugin imports to allowlist mode when no trust file exists.
+  }
+  if (String(modeOverride || "").trim()) {
+    mode = normalizePluginImportPolicyMode(modeOverride, mode);
   }
   return {
     mode,
@@ -278,6 +282,9 @@ export async function initializePluginManager(options = {}) {
     getAppConfig,
     pathModule,
     profile = null,
+    pluginDirectories = [],
+    hostCapabilities = {},
+    externalPluginImportMode = "",
     pluginRuntimeRoot,
     rootDir,
     runtimeContext,
@@ -304,6 +311,7 @@ export async function initializePluginManager(options = {}) {
         fs,
         path: pathModule,
         profile,
+        hostCapabilities,
         runtimeContext,
         validateAdminRequest
       });
@@ -350,10 +358,12 @@ export async function initializePluginManager(options = {}) {
   }
 
   if (!pluginsDisabledByEnv) {
-    const importTrustPolicy = await loadPluginImportTrustPolicy({ fs, pathModule, pluginRuntimeRoot });
+    const importTrustPolicy = await loadPluginImportTrustPolicy({
+      fs, pathModule, pluginRuntimeRoot, modeOverride: externalPluginImportMode
+    });
     const repoPluginDirectory = pathModule.join(rootDir, "plugins");
     const discoveredPluginModulePaths = await discoverPluginModulePaths({
-      directories: pluginDirectoryCandidates({ pathModule, pluginRuntimeRoot, rootDir }),
+      directories: pluginDirectoryCandidates({ pathModule, pluginRuntimeRoot, rootDir, pluginDirectories }),
       skipFiles: builtInPluginFileNames,
       fs,
       pathModule

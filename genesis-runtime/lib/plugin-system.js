@@ -45,6 +45,7 @@ export function createGenesisPluginManager(context = {}) {
     path = null,
     profile = null,
     runtimeContext = {},
+    hostCapabilities = {},
     validateAdminRequest = null
   } = context;
 
@@ -53,6 +54,7 @@ export function createGenesisPluginManager(context = {}) {
   const capabilities = new Map();
   const hooks = new Map();
   const tools = new Map();
+  const toolHandlers = new Map();
   const uiPanels = new Map();
   const uiTabs = new Map();
   const uiPrimaryTabs = new Map();
@@ -87,6 +89,25 @@ export function createGenesisPluginManager(context = {}) {
     ? { ...runtimeContext }
     : {};
   let activeProfile = profile && typeof profile === "object" ? profile : null;
+
+  function registerHostCapabilities(entries = {}) {
+    for (const [capabilityName, handler] of Object.entries(entries && typeof entries === "object" ? entries : {})) {
+      const normalizedName = String(capabilityName || "").trim();
+      if (!normalizedName || typeof handler !== "function") {
+        continue;
+      }
+      const existing = capabilities.get(normalizedName) || [];
+      existing.push({
+        pluginId: "host",
+        capability: normalizedName,
+        handler,
+        host: true,
+        priority: 1,
+        order: registrationSequence++
+      });
+      capabilities.set(normalizedName, existing);
+    }
+  }
 
   async function appendPluginAudit(event = {}) {
     if (!pluginAuditPath || !fs || typeof fs.appendFile !== "function" || !path) {
@@ -998,7 +1019,7 @@ export function createGenesisPluginManager(context = {}) {
     if (!providers.length) {
       return null;
     }
-    const enabledProvider = providers.find((entry) => isPluginEnabled(entry.pluginId));
+    const enabledProvider = providers.find((entry) => entry.host === true || isPluginEnabled(entry.pluginId));
     return enabledProvider ? enabledProvider.handler : null;
   }
 
@@ -1011,7 +1032,8 @@ export function createGenesisPluginManager(context = {}) {
       pluginId: entry.pluginId,
       capability: entry.capability,
       priority: Number(entry.priority || 100),
-      enabled: isPluginEnabled(entry.pluginId)
+      enabled: entry.host === true || isPluginEnabled(entry.pluginId),
+      host: entry.host === true
     }));
   }
 
@@ -1061,6 +1083,32 @@ export function createGenesisPluginManager(context = {}) {
       .filter((plugin) => isPluginEnabled(plugin.id))
       .filter((plugin) => isPluginVisible(plugin.id))
       .flatMap((plugin) => listPluginTools(plugin.id));
+  }
+
+  async function executeTool(name = "", args = {}, context = {}) {
+    const normalizedName = String(name || "").trim();
+    if (!normalizedName) {
+      throw new TypeError("tool name is required");
+    }
+    const descriptor = listPluginTools().find((entry) => entry.name === normalizedName);
+    if (!descriptor) {
+      return { handled: false, name: normalizedName, result: null };
+    }
+    const handlerEntry = toolHandlers.get(`${descriptor.pluginId}:${normalizedName}`);
+    if (handlerEntry && isPluginEnabled(handlerEntry.pluginId)) {
+      const result = await handlerEntry.handler(args && typeof args === "object" ? args : {}, context);
+      return { handled: true, name: normalizedName, pluginId: handlerEntry.pluginId, result: result ?? null };
+    }
+    const hookResult = await runHook("intake:tool-call", {
+      ...context,
+      handled: false,
+      name: normalizedName,
+      args: args && typeof args === "object" ? args : {},
+      result: null
+    });
+    return hookResult?.handled === true
+      ? { handled: true, name: normalizedName, pluginId: String(hookResult.pluginId || descriptor.pluginId), result: hookResult.result ?? null }
+      : { handled: false, name: normalizedName, pluginId: descriptor.pluginId, result: null };
   }
 
   async function runHook(name = "", payload = undefined) {
@@ -1187,7 +1235,7 @@ export function createGenesisPluginManager(context = {}) {
         });
         hooks.set(normalizedName, existing);
       },
-      registerTool: (descriptor = {}) => {
+      registerTool: (descriptor = {}, handler = null) => {
         const normalizedDescriptor = normalizePluginToolDescriptor(pluginId, pluginName, descriptor);
         if (!normalizedDescriptor) {
           return null;
@@ -1202,6 +1250,12 @@ export function createGenesisPluginManager(context = {}) {
           ? existing.map((entry, index) => (index === duplicateIndex ? normalizedDescriptor : entry))
           : [...existing, normalizedDescriptor];
         tools.set(pluginId, nextTools);
+        const handlerKey = `${pluginId}:${normalizedDescriptor.name}`;
+        if (typeof handler === "function") {
+          toolHandlers.set(handlerKey, { pluginId, handler });
+        } else {
+          toolHandlers.delete(handlerKey);
+        }
         return { ...normalizedDescriptor };
       },
       registerUiPanel: (panel = {}) => {
@@ -1390,6 +1444,7 @@ export function createGenesisPluginManager(context = {}) {
   async function initialize() {
     await loadPluginTrustPolicy();
     await loadPluginState();
+    registerHostCapabilities(hostCapabilities);
     const factories = uniquePluginList(pluginFactories);
     let pluginStateChanged = false;
     const factoryResults = await Promise.allSettled(
@@ -1869,9 +1924,22 @@ export function createGenesisPluginManager(context = {}) {
     return null;
   }
 
+  async function shutdown(reason = "host-shutdown") {
+    for (const plugin of [...activePlugins].reverse()) {
+      await invokePluginLifecycleCallback(plugin.id, "onDisable", {
+        pluginId: plugin.id,
+        previousEnabled: isPluginEnabled(plugin.id),
+        enabled: false,
+        source: String(reason || "host-shutdown"),
+        at: Date.now()
+      });
+    }
+  }
+
   return {
     coreApiVersion: CORE_PLUGIN_API_VERSION,
     getCapability,
+    executeTool,
     getCapabilityProviders: listCapabilityProviders,
     getHookRuntimeStats: () => Object.fromEntries([...hookRuntimeStatsByName.entries()].map(([name, stats]) => [name, stats])),
     initialize,
@@ -1884,6 +1952,7 @@ export function createGenesisPluginManager(context = {}) {
     runHook,
     setActiveProfile,
     setRuntimeContext,
+    shutdown,
     use
   };
 }

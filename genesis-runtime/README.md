@@ -5,6 +5,29 @@ infrastructure only — behaviour comes from plugins. See the Genesis Core Extra
 and `../genesis-core/docs/GENESIS-EXTRACTION-CLASSIFICATION.md` for the full extraction plan
 this package implements.
 
+## Reusable host API (0.4)
+
+Genesis can be embedded by host applications instead of only running
+`server.js`. Exported subpaths provide the plugin loader, plugin system, profile manager, admin
+security, and HTTP hooks. `initializePluginManager` accepts explicit `pluginDirectories`,
+`externalPluginImportMode`, and `hostCapabilities`. Host capabilities participate in ordinary
+plugin dependency checks and `api.getCapability(...)` resolution without representing the host
+application as a plugin. Call `pluginManager.shutdown()` during orderly host shutdown so enabled
+plugins receive `onDisable`.
+
+Version 0.3 closes the registered-tool execution gap. Plugins may now use
+`api.registerTool(descriptor, handler)`, and embedded hosts invoke it through
+`pluginManager.executeTool(name, args, context)`. Existing plugins that expose a descriptor and
+handle execution through `intake:tool-call` remain compatible; `executeTool` falls back to that
+hook when no direct handler was registered. Tool discovery through `listTools()` is unchanged.
+
+Version 0.4 (core plugin API 1.5.0) lets a plugin declare what it is about. The optional
+manifest field `topics: { keywords: [...], examples: [...] }` lists the subjects, services and platforms
+it covers (up to 24 keywords) and requests it serves (up to 12 examples). The field is normalised like the
+rest of the manifest and reported through `listPlugins()` in each plugin's `manifest`. A host can use it to
+choose when to offer the plugin's tools, for example by matching incoming messages against it.
+Topics grant nothing: permissions, capabilities and tool registration are unchanged.
+
 ## What's here
 
 - `server.js` — entrypoint. Boots Express, the Observer Compat static mount, admin security,
@@ -17,39 +40,32 @@ this package implements.
   `nova-observer/observer-compat`. Do not edit without updating all compatible orchestrators.
 - `plugins/` — where `*-plugin.js` files are auto-discovered from. Ships **empty** by design
   (Architectural Rule: Genesis boots with zero optional plugins).
-- `profiles/` — deployment profiles (see "Starter profiles" below).
+- `profiles/` — deployment profiles (see "Profiles are first-class" below).
 - `public/` — a minimal status page (`/`) that lists runtime status and installed plugins.
 
 ## Running against an external plugin catalog
 
 `plugins/` ships empty by design, but a real deployment points `GENESIS_PLUGIN_DIR` at wherever
-its plugins actually live — e.g. `E:\AI\genesis-plugins`, a much larger catalog developed
+its plugins actually live — e.g. a separate `genesis-plugins` checkout, a much larger catalog developed
 separately from this repo. Two things to know before doing that:
 
 1. **Import trust.** By default, plugins discovered outside this repo's own `plugins/`
    directory must be on a hash allowlist (`runtime-data/plugin-trust.json`) — a real security
    feature, not a bug, meant for genuinely third-party code. For your own trusted plugin
    directory, set `GENESIS_EXTERNAL_PLUGIN_IMPORT_MODE=permissive` to skip that check.
-2. **Shared dependencies.** Node resolves bare imports (`imapflow`, `keytar`, ...) and relative
-   imports by walking up from the importing file — it does *not* reach into this repo's
-   `node_modules` or `observer-compat/` from a sibling directory. An external plugin catalog
-   needs its own `package.json`/`node_modules`, and any shared Nova-era utility files its
-   plugins import by relative path (e.g. `observer-general-utils.js`, `observer-core-state.js`,
-   `observer-compat/`) need to actually exist at the path those plugins expect. For
-   `E:\AI\genesis-plugins`, those turned out to all resolve to `E:\AI\` itself (one level above
-   the catalog) — trimmed-down versions of those files (only the exports actually imported)
-   now live there.
+2. **Shared dependencies.** Node resolves bare imports from the plugin catalog, not from this
+   runtime's `node_modules`. The maintained `genesis-plugins` catalog therefore has its
+   own package manifest and dependencies. Legacy Nova utility imports use the exported
+   `genesis-runtime/compat/*` subpaths rather than fragile parent-directory shims.
 
 Example:
 ```
-PORT=3300 GENESIS_PLUGIN_DIR="E:\AI\genesis-plugins" GENESIS_EXTERNAL_PLUGIN_IMPORT_MODE=permissive GENESIS_PROFILE=developer node server.js
+PORT=3300 GENESIS_PLUGIN_DIR="/path/to/genesis-plugins" GENESIS_EXTERNAL_PLUGIN_IMPORT_MODE=permissive GENESIS_PROFILE=developer node server.js
 ```
 
-**Known issue in that catalog:** both `E:\AI\genesis-plugins\mail-plugin.js` (this repo's
-original mail plugin, copied out) and `E:\AI\genesis-plugins\mail\mail-plugin.js` (a fuller,
-independently-developed version with its own `lib/`/`public/`) declare `id: "mail"`. Both load;
-whichever registers second wins on conflicting routes. Recommend deleting the flat
-`mail-plugin.js` copy at the catalog root now that the richer `mail/` version exists.
+Catalog version 0.2 composes the original flat mail transport wiring into the richer
+`mail/mail-plugin.js`. It remains the sole discoverable `mail` provider while retaining the
+original agent registry, secrets, IMAP polling, SMTP sending, capabilities, tools, and routes.
 
 ## Profiles are first-class
 
@@ -58,8 +74,7 @@ Profiles aren't sample config — they're the unit you install, activate, and fo
 locally into `plugins/_catalog/` where you're expected to edit it. See "CLI" below for the
 `genesis` command that drives this.
 
-Eight profiles ship in `profiles/`, all validated against the 46-plugin catalog at
-`E:\AI\genesis-plugins` (boots clean, 0 load errors):
+Eight profiles ship in `profiles/`, all validated against the 46-plugin `genesis-plugins` catalog (boots clean, 0 load errors):
 
 | Profile | `genesis create <id>` | Enables |
 |---|---|---|
@@ -116,7 +131,7 @@ explicit object:
 ```json
 {
   "mail": "https://github.com/org/genesis-plugin-mail.git#main",
-  "internal-tool": { "type": "local", "path": "E:\\AI\\genesis-plugins\\internal-tool" }
+  "internal-tool": { "type": "local", "path": "/path/to/genesis-plugins/internal-tool" }
 }
 ```
 
