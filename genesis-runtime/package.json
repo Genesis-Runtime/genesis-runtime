@@ -1,6 +1,6 @@
 {
   "name": "genesis-runtime",
-  "version": "1.6.0",
+  "version": "1.8.0",
   "description": "Genesis: a minimal runtime for hosting plugins, tools, and orchestration components. Infrastructure only — no built-in agents, conversations, memory, workflows, or model providers.",
   "type": "module",
   "private": true,
@@ -23,7 +23,8 @@
     "./ui-settings": "./lib/ui-settings.js",
     "./context-providers": "./lib/context-providers.js",
     "./model-providers": "./lib/model-providers.js",
-    "./compat/collapsible": "./observer-compat/browser/collapsible.js"
+    "./compat/collapsible": "./observer-compat/browser/collapsible.js",
+    "./standard-hooks": "./lib/standard-hooks.js"
   },
   "scripts": {
     "start": "node server.js",

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import {
   filterToolsByProfile,
@@ -69,6 +70,9 @@ export function createGenesisPluginManager(context = {}) {
 
   const pluginFactories = [];
   const activePlugins = [];
+  // Core's own routes: no plugin may exempt them from admin protection.
+  const RESERVED_ROUTE_PREFIXES = ["/api/plugins", "/api/admin-token", "/api/runtime", "/api/context", "/api/model-providers", "/api/ui", "/api/security", "/api/health", "/api/compat"];
+  const routeCovers = (prefix, routePath) => routePath === prefix || routePath.startsWith(`${prefix}/`);
   const capabilities = new Map();
   const hooks = new Map();
   const tools = new Map();
@@ -1109,6 +1113,41 @@ export function createGenesisPluginManager(context = {}) {
       .flatMap((plugin) => listPluginTools(plugin.id));
   }
 
+  // Guards for a tool call: every "tool:before-execute" handler sees the call and may return
+  // { deny: true, reason } or replacement { args }. Unlike ordinary hooks this fails closed:
+  // a guard that throws or times out denies the call, because a broken guard must never
+  // silently allow what it was installed to stop.
+  async function runToolGuards(call = {}) {
+    const handlers = sortByPriorityThenOrder(hooks.get("tool:before-execute") || []);
+    let current = call;
+    for (const handler of handlers) {
+      if (!isPluginEnabled(handler.pluginId)) {
+        continue;
+      }
+      const startedAt = Date.now();
+      try {
+        const verdict = await withTimeout(
+          Promise.resolve().then(() => handler.handler({ ...current, args: { ...current.args } })),
+          getPluginHookTimeoutMs(),
+          `hook tool:before-execute for plugin ${handler.pluginId}`
+        );
+        updateRuntimeStats({ pluginId: handler.pluginId, hookName: "tool:before-execute", durationMs: Date.now() - startedAt, ok: true });
+        if (verdict?.deny === true) {
+          return { ...current, denied: true, deniedBy: handler.pluginId, reason: String(verdict.reason || "denied by policy").trim() };
+        }
+        if (verdict?.args && typeof verdict.args === "object" && !Array.isArray(verdict.args)) {
+          current = { ...current, args: verdict.args };
+        }
+      } catch (error) {
+        const errorText = String(error?.message || error || "unknown guard error");
+        updateRuntimeStats({ pluginId: handler.pluginId, hookName: "tool:before-execute", durationMs: Date.now() - startedAt, ok: false, error: errorText });
+        recordPluginFailure(handler.pluginId, "hook:tool:before-execute", errorText);
+        return { ...current, denied: true, deniedBy: handler.pluginId, reason: `tool guard failed: ${errorText}` };
+      }
+    }
+    return { ...current, denied: false };
+  }
+
   async function executeTool(name = "", args = {}, context = {}) {
     const normalizedName = String(name || "").trim();
     if (!normalizedName) {
@@ -1118,21 +1157,52 @@ export function createGenesisPluginManager(context = {}) {
     if (!descriptor) {
       return { handled: false, name: normalizedName, result: null };
     }
-    const handlerEntry = toolHandlers.get(`${descriptor.pluginId}:${normalizedName}`);
-    if (handlerEntry && isPluginEnabled(handlerEntry.pluginId)) {
-      const result = await handlerEntry.handler(args && typeof args === "object" ? args : {}, context);
-      return { handled: true, name: normalizedName, pluginId: handlerEntry.pluginId, result: result ?? null };
-    }
-    const hookResult = await runHook("intake:tool-call", {
-      ...context,
-      handled: false,
+    const callId = randomUUID();
+    const guarded = await runToolGuards({
+      callId,
       name: normalizedName,
-      args: args && typeof args === "object" ? args : {},
-      result: null
+      pluginId: descriptor.pluginId,
+      risk: descriptor.risk,
+      args: args && typeof args === "object" && !Array.isArray(args) ? args : {},
+      context: context && typeof context === "object" ? context : {}
     });
-    return hookResult?.handled === true
-      ? { handled: true, name: normalizedName, pluginId: String(hookResult.pluginId || descriptor.pluginId), result: hookResult.result ?? null }
-      : { handled: false, name: normalizedName, pluginId: descriptor.pluginId, result: null };
+    if (guarded.denied) {
+      return { handled: true, denied: true, name: normalizedName, pluginId: descriptor.pluginId, deniedBy: guarded.deniedBy, error: guarded.reason, result: null };
+    }
+    const callArgs = guarded.args;
+    // Observers (cognition, tracing) see the call start; the same callId arrives with the result.
+    await runHook("tool:execute-started", { callId, name: normalizedName, pluginId: descriptor.pluginId, args: callArgs, context });
+    let outcome;
+    try {
+      const handlerEntry = toolHandlers.get(`${descriptor.pluginId}:${normalizedName}`);
+      if (handlerEntry && isPluginEnabled(handlerEntry.pluginId)) {
+        const result = await handlerEntry.handler(callArgs, context);
+        outcome = { handled: true, name: normalizedName, pluginId: handlerEntry.pluginId, result: result ?? null };
+      } else {
+        const hookResult = await runHook("intake:tool-call", {
+          ...context,
+          handled: false,
+          name: normalizedName,
+          args: callArgs,
+          result: null
+        });
+        outcome = hookResult?.handled === true
+          ? { handled: true, name: normalizedName, pluginId: String(hookResult.pluginId || descriptor.pluginId), result: hookResult.result ?? null }
+          : { handled: false, name: normalizedName, pluginId: descriptor.pluginId, result: null };
+      }
+    } catch (error) {
+      // Observers (audit, redaction) see failures too; the error still reaches the caller.
+      await runHook("tool:after-execute", { callId, name: normalizedName, pluginId: descriptor.pluginId, args: callArgs, context, result: null, error: String(error?.message || error) });
+      throw error;
+    }
+    if (outcome.handled) {
+      // Observers may replace the result, for example to redact secrets before a model sees it.
+      const after = await runHook("tool:after-execute", { callId, name: normalizedName, pluginId: outcome.pluginId, args: callArgs, context, result: outcome.result, error: "" });
+      if (after && Object.prototype.hasOwnProperty.call(after, "result")) {
+        outcome.result = after.result ?? null;
+      }
+    }
+    return { ...outcome, callId };
   }
 
   function isPluginServing(pluginId = "") {
@@ -1616,6 +1686,22 @@ export function createGenesisPluginManager(context = {}) {
         contextProviders.set(pluginId, [...existing, entry]);
         return describeContextProvider(entry);
       },
+      // Tool use (1.7): a plugin that drives a model, such as an agent runtime, lists the tools
+      // other plugins registered and calls them through core, so tool guards and observers apply.
+      listTools: () => {
+        if (pluginManifest.permissions.toolUse !== true) {
+          recordPluginFailure(pluginId, "manifest:tool-use-denied", "using other plugins' tools is not permitted");
+          return [];
+        }
+        return filterToolsByProfile(listPluginTools(), activeProfile || {});
+      },
+      executeTool: (name = "", args = {}, context = {}) => {
+        if (pluginManifest.permissions.toolUse !== true) {
+          recordPluginFailure(pluginId, "manifest:tool-use-denied", "using other plugins' tools is not permitted");
+          return Promise.reject(new TypeError("using other plugins' tools is not permitted"));
+        }
+        return executeTool(name, args, { ...(context && typeof context === "object" ? context : {}), callerPluginId: pluginId });
+      },
       collectContext: async (request = {}) => {
         if (pluginManifest.permissions.contextCollect !== true) {
           recordPluginFailure(pluginId, "manifest:context-collect-denied", "collecting context is not permitted");
@@ -1882,6 +1968,11 @@ export function createGenesisPluginManager(context = {}) {
         } catch (error) {
           recordPluginFailure(pluginMeta.id, "init", error);
           continue;
+        }
+      }
+      for (const route of pluginMeta.manifest.permissions.publicRoutes || []) {
+        if (RESERVED_ROUTE_PREFIXES.some((reserved) => routeCovers(reserved, route) || routeCovers(route, reserved))) {
+          recordPluginFailure(pluginMeta.id, "manifest:public-route-denied", `${route} overlaps a core route and stays protected`);
         }
       }
       activePlugins.push({
@@ -2279,6 +2370,20 @@ export function createGenesisPluginManager(context = {}) {
     return activePlugins.filter((plugin) => isPluginVisible(plugin.id)).map((plugin) => buildPluginDescriptor(plugin));
   }
 
+  // Routes enabled plugins declared as authenticating their own callers (permissions.publicRoutes).
+  function listPublicRoutes() {
+    return activePlugins
+      .filter((plugin) => isPluginServing(plugin.id))
+      .flatMap((plugin) => (plugin.manifest?.permissions?.publicRoutes || [])
+        .filter((route) => !RESERVED_ROUTE_PREFIXES.some((reserved) => routeCovers(reserved, route) || routeCovers(route, reserved)))
+        .map((route) => ({ pluginId: plugin.id, route })));
+  }
+
+  function isPublicRoute(routePath = "") {
+    const normalized = String(routePath || "").split("?")[0];
+    return listPublicRoutes().some(({ route }) => routeCovers(route, normalized));
+  }
+
   function listRegressionSuites(context = {}) {
     const suites = [];
     const seenSuiteIds = new Set();
@@ -2319,7 +2424,38 @@ export function createGenesisPluginManager(context = {}) {
     return null;
   }
 
+  // Lifecycle hooks (1.7): runtime:startup once, then runtime:tick:1m / runtime:tick:5m on
+  // timers that never overlap a tick still running and never keep the process alive.
+  const lifecycleTimers = [];
+  let lifecycleStarted = false;
+  async function startLifecycle({ tickIntervals = { "runtime:tick:1m": 60_000, "runtime:tick:5m": 300_000 } } = {}) {
+    if (lifecycleStarted) {
+      return;
+    }
+    lifecycleStarted = true;
+    await runHook("runtime:startup", { at: Date.now(), coreVersion: CORE_PLUGIN_API_VERSION });
+    for (const [hookName, interval] of Object.entries(tickIntervals || {})) {
+      let running = false;
+      const timer = setInterval(() => {
+        if (running) {
+          return;
+        }
+        running = true;
+        runHook(hookName, { at: Date.now(), interval }).catch(() => {}).finally(() => { running = false; });
+      }, Math.max(1000, Number(interval) || 60_000));
+      timer.unref?.();
+      lifecycleTimers.push(timer);
+    }
+  }
+
   async function shutdown(reason = "host-shutdown") {
+    while (lifecycleTimers.length) {
+      clearInterval(lifecycleTimers.pop());
+    }
+    if (lifecycleStarted) {
+      lifecycleStarted = false;
+      await runHook("runtime:shutdown", { at: Date.now(), reason: String(reason || "host-shutdown") });
+    }
     for (const plugin of [...activePlugins].reverse()) {
       await invokePluginLifecycleCallback(plugin.id, "onDisable", {
         pluginId: plugin.id,
@@ -2347,6 +2483,9 @@ export function createGenesisPluginManager(context = {}) {
     getCapabilityProviders: listCapabilityProviders,
     getHookRuntimeStats: () => Object.fromEntries([...hookRuntimeStatsByName.entries()].map(([name, stats]) => [name, stats])),
     initialize,
+    isPublicRoute,
+    listPublicRoutes,
+    startLifecycle,
     listCapabilityProviders,
     listTools: () => filterToolsByProfile(listPluginTools(), activeProfile || {}),
     listRegressionSuites,

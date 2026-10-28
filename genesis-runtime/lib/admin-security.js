@@ -18,12 +18,23 @@ const DEFAULT_UI_SESSION_PUBLIC_PATHS = [
 
 const DEFAULT_INTAKE_RATE_LIMIT_PATHS = [];
 
+// Reads a host UI needs before it has a token. Only consulted when reads are protected.
+const DEFAULT_PUBLIC_READ_PATHS = [
+  "/api/ui/settings"
+];
+
 export function createAdminSecurity({
   port,
   protectedPrefix = DEFAULT_UI_SESSION_PROTECTED_PREFIX,
   publicPaths = DEFAULT_UI_SESSION_PUBLIC_PATHS,
   rateLimitPaths = DEFAULT_INTAKE_RATE_LIMIT_PATHS,
-  adminUiToken = crypto.randomBytes(24).toString("hex"),
+  adminUiToken = String(process.env.GENESIS_ADMIN_TOKEN || "").trim() || crypto.randomBytes(24).toString("hex"),
+  // Off by default: only unsafe methods need the admin token. Hosts whose plugin data is
+  // private (task transcripts, tool output) set GENESIS_PROTECT_API_READS=1 so GETs do too.
+  protectReads = String(process.env.GENESIS_PROTECT_API_READS || "").trim() === "1",
+  publicReadPaths = DEFAULT_PUBLIC_READ_PATHS,
+  // (path) => true for routes a plugin declared as authenticating its own callers (1.8).
+  isPublicRoute = () => false,
   getVoiceProfileCount = () => 0,
   sessionInactivityMs = Math.max(
     60_000,
@@ -42,6 +53,7 @@ export function createAdminSecurity({
   const normalizedPort = Number(port || process.env.PORT || 3220);
   const publicPathSet = new Set(Array.isArray(publicPaths) ? publicPaths : []);
   const rateLimitPathSet = new Set(Array.isArray(rateLimitPaths) ? rateLimitPaths : []);
+  const publicReadPathSet = new Set([...publicPathSet, ...(Array.isArray(publicReadPaths) ? publicReadPaths : [])]);
   const rateLimitBuckets = new Map();
   const uiSessions = new Map();
   const serverUnlockTickets = [];
@@ -401,12 +413,18 @@ export function createAdminSecurity({
     });
 
     app.use(protectedPrefix, (req, res, next) => {
-      if (isSafeRequestMethod(req.method)) {
-        return next();
-      }
       // req.path is relative to the /api mount point here, so compare against the
       // original absolute path (minus query string) rather than req.path.
       const requestPath = String(req.originalUrl || req.path || "").split("?")[0].trim();
+      if (isPublicRoute(requestPath) === true) {
+        return next();
+      }
+      if (isSafeRequestMethod(req.method)) {
+        if (!protectReads || publicReadPathSet.has(requestPath) || validateAdminRequest(req)) {
+          return next();
+        }
+        return res.status(403).json({ ok: false, error: "Admin token required" });
+      }
       if (publicPathSet.has(requestPath)) {
         return next();
       }

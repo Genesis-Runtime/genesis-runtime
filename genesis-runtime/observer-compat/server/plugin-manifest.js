@@ -34,7 +34,15 @@ export function normalizeManifestPermissions(permissions = {}) {
     // modelProviders: model provider type ids the plugin may register (e.g. "meterless").
     // modelProviderUse: it may probe and generate through registered provider types.
     modelProviders: normalizePermissionRules(permissions.modelProviders),
-    modelProviderUse: permissions.modelProviderUse === true
+    modelProviderUse: permissions.modelProviderUse === true,
+    // toolUse (1.7): it may list and execute tools other plugins registered, through core,
+    // so tool:before-execute guards and tool:after-execute observers apply.
+    toolUse: permissions.toolUse === true,
+    // publicRoutes (1.8): path prefixes of this plugin's routes that authenticate their callers
+    // themselves (a signed header, an API key), so core's admin-token check does not apply.
+    publicRoutes: (Array.isArray(permissions.publicRoutes) ? permissions.publicRoutes : [])
+      .map((route) => String(route || "").trim().replace(/\/+$/, ""))
+      .filter((route) => route.startsWith("/") && route.length > 1)
   };
 }
 

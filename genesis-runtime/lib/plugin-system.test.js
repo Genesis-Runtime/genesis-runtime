@@ -89,10 +89,12 @@ test("registered tool handlers execute directly and legacy tools retain hook dis
   }));
 
   await manager.initialize();
-  assert.deepEqual(await manager.executeTool("direct_tool", { value: 7 }), {
+  // Since 1.7 every outcome also carries the call's callId.
+  const withoutCallId = ({ callId, ...rest }) => { assert.ok(callId); return rest; };
+  assert.deepEqual(withoutCallId(await manager.executeTool("direct_tool", { value: 7 })), {
     handled: true, name: "direct_tool", pluginId: "tool-provider", result: { value: 7 }
   });
-  assert.deepEqual(await manager.executeTool("legacy_tool", { value: 9 }), {
+  assert.deepEqual(withoutCallId(await manager.executeTool("legacy_tool", { value: 9 })), {
     handled: true, name: "legacy_tool", pluginId: "tool-provider", result: { legacy: 9 }
   });
   assert.equal((await manager.executeTool("missing_tool")).handled, false);
@@ -116,7 +118,7 @@ test("a plugin's declared topics are normalised and reported with its manifest",
   }));
   await manager.initialize();
   const [plugin] = manager.listPlugins();
-  assert.equal(plugin.coreApiVersion, "1.6.0");
+  assert.equal(plugin.coreApiVersion, "1.8.0");
   assert.deepEqual(plugin.manifest.topics, { keywords: ["LinkedIn", "Reddit"], examples: ["Draft a post for LinkedIn"] });
   await manager.shutdown();
 });

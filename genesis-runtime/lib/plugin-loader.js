@@ -64,6 +64,9 @@ export function createNoopPluginManager({ app = null, runtimeRoot = "", loadErro
     setActiveProfile: () => {},
     setRuntimeContext: () => {},
     shutdown: async () => {},
+    startLifecycle: async () => {},
+    isPublicRoute: () => false,
+    listPublicRoutes: () => [],
     use: () => {}
   };
 }

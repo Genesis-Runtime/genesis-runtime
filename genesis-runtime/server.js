@@ -8,7 +8,7 @@ import { createAdminSecurity } from "./lib/admin-security.js";
 import { createHttpHooks } from "./lib/http-hooks.js";
 import { initializePluginManager } from "./lib/plugin-loader.js";
 
-const CORE_VERSION = "1.6.0";
+const CORE_VERSION = "1.8.0";
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const pluginRuntimeRoot = path.join(rootDir, "runtime-data");
 const port = Number(process.env.PORT || 3300);
@@ -27,8 +27,25 @@ function broadcast(message) {
   }
 }
 
+// Host app config (1.7): plugins read it with api.getAppConfig(). A JSON file named by
+// GENESIS_CONFIG_FILE, or runtime-data/app-config.json when present. It holds settings, never
+// secrets: credentials belong in the secrets store or in files the config points to.
+async function loadAppConfig() {
+  const configPath = String(process.env.GENESIS_CONFIG_FILE || "").trim() || path.join(pluginRuntimeRoot, "app-config.json");
+  try {
+    const parsed = JSON.parse(await fs.readFile(configPath, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    if (error?.code === "ENOENT" && !process.env.GENESIS_CONFIG_FILE) {
+      return {};
+    }
+    throw new Error(`could not read app config ${configPath}: ${error.message}`);
+  }
+}
+
 async function main() {
   await fs.mkdir(pluginRuntimeRoot, { recursive: true });
+  const appConfig = Object.freeze(await loadAppConfig());
   await fs.mkdir(path.join(rootDir, "plugins"), { recursive: true });
 
   const profile = await loadActiveProfile({
@@ -41,11 +58,6 @@ async function main() {
   const app = express();
   app.use(express.json({ limit: "5mb" }));
 
-  // Observer Compat is the shared compatibility contract other orchestrators (Nova, Omega, ...)
-  // rely on. Serve it at a stable path so browser-side plugin tabs can depend on it.
-  app.use("/observer-compat", express.static(path.join(rootDir, "observer-compat")));
-  app.use(express.static(path.join(rootDir, "public")));
-
   app.get("/events/logs", (req, res) => {
     res.set({
       "Content-Type": "text/event-stream",
@@ -57,14 +69,15 @@ async function main() {
     req.on("close", () => sseClients.delete(res));
   });
 
-  const adminSecurity = createAdminSecurity({ port });
+  let pluginManagerRef = null;
+  const adminSecurity = createAdminSecurity({ port, isPublicRoute: (routePath) => pluginManagerRef?.isPublicRoute?.(routePath) === true });
   adminSecurity.registerAdminSecurityMiddleware(app);
 
   const { pluginManager, pluginLoadErrors } = await initializePluginManager({
     app,
     broadcast,
     fs,
-    getAppConfig: () => ({}),
+    getAppConfig: () => appConfig,
     pathModule: path,
     profile,
     pluginRuntimeRoot,
@@ -73,10 +86,18 @@ async function main() {
     validateAdminRequest: adminSecurity.validateAdminRequest
   });
 
+  pluginManagerRef = pluginManager;
   const httpHooks = createHttpHooks({ getPluginManager: () => pluginManager });
   app.use(httpHooks.requestTrackingMiddleware);
 
   await pluginManager.registerRoutes();
+
+  // Static files come after plugin routes (1.8), so a plugin that serves an app at "/" wins;
+  // without one, "/" is still Genesis's status page. Observer Compat is the shared
+  // compatibility contract other orchestrators (Nova, Omega, ...) rely on, at a stable path so
+  // browser-side plugin tabs can depend on it.
+  app.use("/observer-compat", express.static(path.join(rootDir, "observer-compat")));
+  app.use(express.static(path.join(rootDir, "public")));
 
   const startedAt = Date.now();
   app.get("/api/runtime/status", (req, res) => {
@@ -101,6 +122,8 @@ async function main() {
       mountPath: "/observer-compat"
     });
   });
+
+  await pluginManager.startLifecycle?.();
 
   const server = app.listen(port, () => {
     console.log(`[genesis] listening on http://127.0.0.1:${port} (profile: ${profile.id})`);

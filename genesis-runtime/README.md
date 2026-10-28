@@ -52,6 +52,16 @@ themselves. Each is additive and needs its own manifest permission:
 
 See `docs/plugin-api-1.6.md`.
 
+Version 1.7 (core plugin API 1.7.0) lets a plugin with `permissions.toolUse` list and call
+other plugins' tools through core, behind fail-closed `tool:before-execute` guards and
+`tool:after-execute` observers. It adds the standard runtime, tool and task hooks
+(`docs/hooks.md`), plus the `GENESIS_PROTECT_API_READS`, `GENESIS_ADMIN_TOKEN` and
+`GENESIS_CONFIG_FILE` settings. See `docs/plugin-api-1.7.md`.
+
+Version 1.8 (core plugin API 1.8.0) lets a plugin serve a whole app. `permissions.publicRoutes`
+names routes that authenticate their own callers, and plugin routes now come before static
+files, so a plugin may serve `/`. See `docs/plugin-api-1.8.md`.
+
 ## What's here
 
 - `server.js` — entrypoint. Boots Express, the Observer Compat static mount, admin security,
