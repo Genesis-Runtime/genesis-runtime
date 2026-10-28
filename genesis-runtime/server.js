@@ -8,7 +8,7 @@ import { createAdminSecurity } from "./lib/admin-security.js";
 import { createHttpHooks } from "./lib/http-hooks.js";
 import { initializePluginManager } from "./lib/plugin-loader.js";
 
-const CORE_VERSION = "0.1.0";
+const CORE_VERSION = "1.6.0";
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const pluginRuntimeRoot = path.join(rootDir, "runtime-data");
 const port = Number(process.env.PORT || 3300);

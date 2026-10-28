@@ -31,6 +31,22 @@ import {
   normalizeManifestPermissions,
   normalizePluginManifest
 } from "../observer-compat/server/plugin-manifest.js";
+import { normalizeResponsePanel, pluginViewId, resolveHomeView } from "./ui-settings.js";
+import {
+  CONTEXT_AUDIENCES,
+  DEFAULT_CONTEXT_MAX_CHARS,
+  assembleContext,
+  describeContextProvider,
+  matchDeclarativeScope,
+  normalizeContextProviderDescriptor,
+  normalizeContribution
+} from "./context-providers.js";
+import {
+  describeModelProvider,
+  normalizeCompletion,
+  normalizeModelProviderDescriptor,
+  normalizeProbe
+} from "./model-providers.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_TRACKED_PLUGIN_FAILURES = 500;
@@ -46,7 +62,9 @@ export function createGenesisPluginManager(context = {}) {
     profile = null,
     runtimeContext = {},
     hostCapabilities = {},
-    validateAdminRequest = null
+    validateAdminRequest = null,
+    // The view a host UI opens on when nothing else chooses one (see ui-settings.js).
+    defaultHomeView = ""
   } = context;
 
   const pluginFactories = [];
@@ -60,6 +78,9 @@ export function createGenesisPluginManager(context = {}) {
   const uiPrimaryTabs = new Map();
   const uiSecretsTabs = new Map();
   const uiSystemTabs = new Map();
+  const homeViewClaims = new Map();
+  const contextProviders = new Map();
+  const modelProviders = new Map();
   const regressionSuites = new Map();
   const internalRegressionRunners = new Map();
   const pluginRoutes = new Map();
@@ -992,6 +1013,9 @@ export function createGenesisPluginManager(context = {}) {
       uiSecretsTabCount: uiSecretsTabsForPlugin.length,
       uiSystemTabs: uiSystemTabsForPlugin,
       uiSystemTabCount: uiSystemTabsForPlugin.length,
+      homeViewClaim: homeViewClaims.get(plugin.id)?.view || null,
+      contextProviders: (contextProviders.get(plugin.id) || []).map(describeContextProvider),
+      modelProviders: [...modelProviders.values()].filter((provider) => provider.pluginId === plugin.id).map(describeModelProvider),
       regressionSuiteCount: regressionSuitesForPlugin.length,
       internalRegressionModes: internalRegressionModesForPlugin,
       internalRegressionModeCount: internalRegressionModesForPlugin.length,
@@ -1109,6 +1133,259 @@ export function createGenesisPluginManager(context = {}) {
     return hookResult?.handled === true
       ? { handled: true, name: normalizedName, pluginId: String(hookResult.pluginId || descriptor.pluginId), result: hookResult.result ?? null }
       : { handled: false, name: normalizedName, pluginId: descriptor.pluginId, result: null };
+  }
+
+  function isPluginServing(pluginId = "") {
+    return isPluginEnabled(pluginId) && isPluginVisible(pluginId);
+  }
+
+  function pluginNameFor(pluginId = "") {
+    return activePlugins.find((plugin) => plugin.id === pluginId)?.name || pluginId;
+  }
+
+  // What a host UI needs at startup: its title, hidden tabs, and the resolved home view.
+  function getUiSettings() {
+    const primaryTabs = activePlugins.filter((plugin) => isPluginServing(plugin.id))
+      .flatMap((plugin) => listPluginUiPrimaryTabs(plugin.id).map((tab) => ({ ...tab, pluginName: plugin.name })));
+    const claims = [...homeViewClaims.values()].filter((claim) => isPluginServing(claim.pluginId));
+    const resolved = resolveHomeView({ profile: activeProfile, claims, primaryTabs, defaultHomeView });
+    return {
+      title: String(activeProfile?.ui?.title || "Genesis").trim() || "Genesis",
+      hiddenTabs: Array.isArray(activeProfile?.ui?.hiddenTabs) ? activeProfile.ui.hiddenTabs.slice() : [],
+      homeView: resolved.homeView,
+      homeViewSource: resolved.source,
+      ...(resolved.claimedBy ? { homeViewClaimedBy: resolved.claimedBy } : {}),
+      homeTab: resolved.homeTab,
+      unavailableHomeViews: resolved.unavailable,
+      responsePanel: normalizeResponsePanel(activeProfile?.ui?.responsePanel)
+    };
+  }
+
+  function servingContextProviders(audience = "") {
+    return sortByPriorityThenOrder(
+      [...contextProviders.values()].flat()
+        .filter((provider) => isPluginServing(provider.pluginId))
+        .filter((provider) => !audience || provider.audiences.includes(audience))
+    );
+  }
+
+  function listContextProviders({ audience = "" } = {}) {
+    const disabled = new Set(Array.isArray(activeProfile?.context?.disabledProviders) ? activeProfile.context.disabledProviders : []);
+    return servingContextProviders(audience).map((provider) => ({
+      ...describeContextProvider(provider),
+      pluginName: pluginNameFor(provider.pluginId),
+      enabled: !disabled.has(provider.key)
+    }));
+  }
+
+  // Collects the notes the message is in scope for, from every serving provider, in priority
+  // order. A provider that fails or times out contributes nothing and never fails the call.
+  async function collectContext(request = {}) {
+    const message = String(request?.message ?? "").trim();
+    const audience = CONTEXT_AUDIENCES.includes(request?.audience) ? request.audience : "chat";
+    const empty = { audience, sections: [], text: "", chars: 0, skipped: [], failures: [] };
+    if (!message) {
+      return empty;
+    }
+    const only = Array.isArray(request.providers) && request.providers.length ? new Set(request.providers.map(String)) : null;
+    const exclude = new Set([
+      ...(Array.isArray(request.exclude) ? request.exclude.map(String) : []),
+      ...(Array.isArray(activeProfile?.context?.disabledProviders) ? activeProfile.context.disabledProviders.map(String) : [])
+    ]);
+    const requestedTimeout = Number(request.timeoutMs);
+    const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
+      ? Math.min(requestedTimeout, 120000)
+      : getPluginHookTimeoutMs();
+    const requestedBudget = Number(request.maxChars);
+    const maxChars = Number.isFinite(requestedBudget) && requestedBudget > 0 ? Math.round(requestedBudget) : DEFAULT_CONTEXT_MAX_CHARS;
+    const metadata = request.metadata && typeof request.metadata === "object" ? { ...request.metadata } : {};
+    const skipped = [];
+    const failures = [];
+
+    const providers = servingContextProviders(audience);
+    const outcomes = await Promise.all(providers.map(async (provider) => {
+      if (only && !only.has(provider.key)) {
+        return { skip: "not requested" };
+      }
+      if (exclude.has(provider.key)) {
+        return { skip: "disabled" };
+      }
+      const declarative = matchDeclarativeScope(provider, message);
+      if (declarative && !declarative.matched) {
+        return { skip: "out of scope" };
+      }
+      const scope = { keywords: declarative?.keywords || [], patterns: declarative?.patterns || [], custom: null };
+      const providerRequest = { message, audience, scope, metadata };
+      try {
+        if (provider.match.custom) {
+          const custom = await withTimeout(
+            Promise.resolve().then(() => provider.match.custom(providerRequest)),
+            timeoutMs,
+            `context scope ${provider.key}`
+          );
+          if (!custom) {
+            return { skip: "out of scope" };
+          }
+          scope.custom = typeof custom === "object" ? custom : true;
+        }
+        const value = await withTimeout(
+          Promise.resolve().then(() => provider.handler(providerRequest)),
+          timeoutMs,
+          `context provider ${provider.key}`
+        );
+        const contribution = normalizeContribution(provider, value);
+        if (!contribution) {
+          return { skip: "nothing in scope" };
+        }
+        return {
+          section: {
+            key: provider.key,
+            pluginId: provider.pluginId,
+            pluginName: pluginNameFor(provider.pluginId),
+            providerId: provider.id,
+            title: provider.title,
+            scope,
+            ...contribution
+          }
+        };
+      } catch (error) {
+        const text = String(error?.message || error || "unknown context provider error");
+        recordPluginFailure(provider.pluginId, `context:${provider.id}`, text);
+        return { failure: text };
+      }
+    }));
+
+    const sections = [];
+    outcomes.forEach((outcome, index) => {
+      const key = providers[index].key;
+      if (outcome.section) sections.push(outcome.section);
+      else if (outcome.failure) failures.push({ key, error: outcome.failure });
+      else skipped.push({ key, reason: outcome.skip });
+    });
+    const assembled = assembleContext(sections, maxChars);
+    return {
+      audience,
+      sections: assembled.sections,
+      text: assembled.text,
+      chars: assembled.chars,
+      skipped: [...skipped, ...assembled.omitted],
+      failures
+    };
+  }
+
+  function listModelProviders() {
+    return [...modelProviders.values()]
+      .filter((provider) => isPluginServing(provider.pluginId))
+      .sort((left, right) => left.label.localeCompare(right.label))
+      .map((provider) => ({ ...describeModelProvider(provider), pluginName: pluginNameFor(provider.pluginId) }));
+  }
+
+  function requireModelProvider(providerId = "") {
+    const provider = modelProviders.get(normalizePluginId(providerId));
+    if (!provider || !isPluginServing(provider.pluginId)) {
+      throw new TypeError(`Unknown model provider: ${String(providerId || "")}`);
+    }
+    return provider;
+  }
+
+  // What a provider's handlers receive. Secrets are limited to the handles it declared and
+  // come from the installed secrets:* capabilities, falling back to an environment variable
+  // of the same name (as hosts already allow for API keys).
+  function modelProviderContext(provider, extra = {}) {
+    const declared = new Set(provider.secrets.map((secret) => secret.handle));
+    const allowed = (handle) => {
+      const name = String(handle || "");
+      if (!declared.has(name)) {
+        throw new TypeError(`model provider ${provider.id} did not declare secret ${name}`);
+      }
+      return name;
+    };
+    const get = async (handle) => {
+      const name = allowed(handle);
+      const read = getCapability("secrets:get");
+      const stored = read ? await read({ handle: name }) : null;
+      return String(stored ?? "").trim() || String(process.env[name] ?? "").trim() || null;
+    };
+    return {
+      pluginId: provider.pluginId,
+      providerId: provider.id,
+      secrets: {
+        get,
+        has: async (handle) => Boolean(await get(handle)),
+        set: async (handle, value) => {
+          const name = allowed(handle);
+          const write = getCapability("secrets:set");
+          if (!write) {
+            throw new TypeError("No secret store is installed (secrets:set)");
+          }
+          await write({ handle: name, value: String(value ?? "") });
+          return { handle: name, stored: true };
+        }
+      },
+      ...extra
+    };
+  }
+
+  async function normalizeModelProviderConfig(providerId = "", config = {}) {
+    const provider = requireModelProvider(providerId);
+    const merged = { ...structuredClone(provider.defaults), ...(config && typeof config === "object" ? config : {}), provider: provider.id };
+    if (!provider.handlers.normalizeConfig) {
+      return merged;
+    }
+    const normalized = await provider.handlers.normalizeConfig(merged, modelProviderContext(provider));
+    return { ...(normalized && typeof normalized === "object" ? normalized : merged), provider: provider.id };
+  }
+
+  async function probeModelProvider(providerId = "", config = {}, options = {}) {
+    const provider = requireModelProvider(providerId);
+    if (!provider.handlers.probe) {
+      return { status: "offline", models: [], detail: `${provider.label} cannot be probed` };
+    }
+    try {
+      const normalized = await normalizeModelProviderConfig(provider.id, config);
+      const result = await withTimeout(
+        Promise.resolve().then(() => provider.handlers.probe(normalized, modelProviderContext(provider))),
+        Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : getPluginHookTimeoutMs(),
+        `model provider ${provider.id} probe`
+      );
+      return normalizeProbe(result);
+    } catch (error) {
+      return { status: "offline", models: [], detail: String(error?.message || error) };
+    }
+  }
+
+  async function runModelProviderAction(providerId = "", actionId = "", input = {}) {
+    const provider = requireModelProvider(providerId);
+    const action = provider.handlers.actions[String(actionId || "")];
+    if (!action) {
+      throw new TypeError(`model provider ${provider.id} has no action ${String(actionId || "")}`);
+    }
+    return withTimeout(
+      Promise.resolve().then(() => action(input && typeof input === "object" ? input : {}, modelProviderContext(provider))),
+      getPluginHookTimeoutMs(),
+      `model provider ${provider.id} action ${actionId}`
+    );
+  }
+
+  async function setModelProviderSecret(providerId = "", handle = "", value = "") {
+    const provider = requireModelProvider(providerId);
+    if (!String(value ?? "").trim()) {
+      throw new TypeError("A secret value is required");
+    }
+    return modelProviderContext(provider).secrets.set(handle, value);
+  }
+
+  // The call itself. The provider honours request.timeoutMs and request.signal; Genesis adds
+  // no timeout of its own, since some runtimes take minutes to load a model.
+  async function generateWithModelProvider(providerId = "", config = {}, request = {}) {
+    const provider = requireModelProvider(providerId);
+    const normalized = await normalizeModelProviderConfig(provider.id, config);
+    const input = request && typeof request === "object" ? request : {};
+    const messages = Array.isArray(input.messages) && input.messages.length
+      ? input.messages
+      : [{ role: "user", content: String(input.prompt ?? "") }];
+    const result = await provider.handlers.generate(normalized, { ...input, messages }, modelProviderContext(provider, input.signal ? { signal: input.signal } : {}));
+    return normalizeCompletion(result);
   }
 
   async function runHook(name = "", payload = undefined) {
@@ -1307,7 +1584,80 @@ export function createGenesisPluginManager(context = {}) {
           ? existing.map((entry) => (entry.id === normalizedTab.id ? normalizedTab : entry))
           : [...existing, normalizedTab];
         uiPrimaryTabs.set(pluginId, nextTabs);
+        // A tab registered with `home: true` asks to be the host's home view. It needs the
+        // manifest's homeView permission, and an explicit env or profile choice still wins.
+        if (tab.home === true) {
+          if (pluginManifest.permissions.homeView === true) {
+            homeViewClaims.set(pluginId, {
+              pluginId,
+              view: pluginViewId(normalizedTab),
+              priority: normalizePriority(tab.homePriority),
+              order: registrationSequence++
+            });
+          } else {
+            recordPluginFailure(pluginId, "manifest:home-view-denied", `tab ${normalizedTab.id} asked to be the home view without the homeView permission`);
+          }
+        } else if (homeViewClaims.get(pluginId)?.view === pluginViewId(normalizedTab)) {
+          homeViewClaims.delete(pluginId);
+        }
         return normalizedTab;
+      },
+      registerContextProvider: (descriptor = {}, provide = null) => {
+        const normalized = normalizeContextProviderDescriptor(pluginId, descriptor);
+        if (!normalized || typeof provide !== "function") {
+          return null;
+        }
+        if (!hasManifestPermission(pluginManifest.permissions.contextProviders, normalized.id)) {
+          recordPluginFailure(pluginId, "manifest:context-provider-denied", `context provider ${normalized.id} is not permitted`);
+          return null;
+        }
+        const entry = { ...normalized, handler: provide, order: registrationSequence++ };
+        const existing = (contextProviders.get(pluginId) || []).filter((provider) => provider.id !== normalized.id);
+        contextProviders.set(pluginId, [...existing, entry]);
+        return describeContextProvider(entry);
+      },
+      collectContext: async (request = {}) => {
+        if (pluginManifest.permissions.contextCollect !== true) {
+          recordPluginFailure(pluginId, "manifest:context-collect-denied", "collecting context is not permitted");
+          return { audience: "chat", sections: [], text: "", chars: 0, skipped: [], failures: [] };
+        }
+        return collectContext(request);
+      },
+      getUiSettings: () => getUiSettings(),
+      // A model provider type, e.g. { id: "meterless", fields, defaults, secrets, actions } with
+      // { generate, normalizeConfig?, probe?, actions? }. Ids are global: hosts store them as a
+      // processor's provider, so a second plugin cannot take an id already registered.
+      registerModelProvider: (descriptor = {}, handlers = {}) => {
+        const normalized = normalizeModelProviderDescriptor(pluginId, descriptor, handlers);
+        if (!normalized) {
+          return null;
+        }
+        if (!hasManifestPermission(pluginManifest.permissions.modelProviders, normalized.id)) {
+          recordPluginFailure(pluginId, "manifest:model-provider-denied", `model provider ${normalized.id} is not permitted`);
+          return null;
+        }
+        const existing = modelProviders.get(normalized.id);
+        if (existing && existing.pluginId !== pluginId) {
+          recordPluginFailure(pluginId, "model-provider-duplicate", `model provider ${normalized.id} is already registered by ${existing.pluginId}`);
+          return null;
+        }
+        modelProviders.set(normalized.id, normalized);
+        return describeModelProvider(normalized);
+      },
+      listModelProviders: () => listModelProviders(),
+      probeModelProvider: (providerId = "", config = {}, options = {}) => {
+        if (pluginManifest.permissions.modelProviderUse !== true) {
+          recordPluginFailure(pluginId, "manifest:model-provider-use-denied", "using model providers is not permitted");
+          return Promise.resolve({ status: "offline", models: [], detail: "not permitted" });
+        }
+        return probeModelProvider(providerId, config, options);
+      },
+      generateWithModelProvider: (providerId = "", config = {}, request = {}) => {
+        if (pluginManifest.permissions.modelProviderUse !== true) {
+          recordPluginFailure(pluginId, "manifest:model-provider-use-denied", "using model providers is not permitted");
+          return Promise.reject(new TypeError("using model providers is not permitted"));
+        }
+        return generateWithModelProvider(providerId, config, request);
       },
       registerUiSecretsTab: (tab = {}) => {
         if (!canRegisterUiPanels) {
@@ -1630,6 +1980,51 @@ export function createGenesisPluginManager(context = {}) {
       }
       return false;
     }
+    // Public: a host UI reads it before it has an admin token, and it holds nothing secret.
+    app.get("/api/ui/settings", (req, res) => {
+      res.json({ ok: true, ...getUiSettings() });
+    });
+    app.get("/api/context/providers", (req, res) => {
+      if (!ensureAdmin(req, res)) {
+        return;
+      }
+      res.json({ ok: true, providers: listContextProviders({ audience: String(req.query?.audience || "") }) });
+    });
+    app.post("/api/context/collect", async (req, res) => {
+      if (!ensureAdmin(req, res)) {
+        return;
+      }
+      try {
+        res.json({ ok: true, ...(await collectContext(req.body || {})) });
+      } catch (error) {
+        res.status(500).json({ ok: false, error: String(error?.message || error) });
+      }
+    });
+    const providerRoute = (handler) => async (req, res) => {
+      if (!ensureAdmin(req, res)) {
+        return;
+      }
+      try {
+        res.json({ ok: true, ...(await handler(req)) });
+      } catch (error) {
+        res.status(error instanceof TypeError ? 400 : 500).json({ ok: false, error: String(error?.message || error) });
+      }
+    };
+    app.get("/api/model-providers", providerRoute(async () => ({ providers: listModelProviders() })));
+    app.post("/api/model-providers/:providerId/normalize", providerRoute(async (req) => ({
+      config: await normalizeModelProviderConfig(req.params.providerId, req.body?.config)
+    })));
+    app.post("/api/model-providers/:providerId/probe", providerRoute(async (req) =>
+      probeModelProvider(req.params.providerId, req.body?.config)));
+    app.post("/api/model-providers/:providerId/actions/:actionId", providerRoute(async (req) => ({
+      result: await runModelProviderAction(req.params.providerId, req.params.actionId, req.body || {})
+    })));
+    // Stores a declared secret; the value is never echoed back.
+    app.post("/api/model-providers/:providerId/secrets/:handle", providerRoute(async (req) =>
+      setModelProviderSecret(req.params.providerId, req.params.handle, req.body?.value)));
+    app.post("/api/model-providers/:providerId/generate", providerRoute(async (req) => ({
+      completion: await generateWithModelProvider(req.params.providerId, req.body?.config, req.body?.request)
+    })));
     app.get("/api/plugins/list", async (req, res) => {
       if (!ensureAdmin(req, res)) {
         return;
@@ -1940,6 +2335,15 @@ export function createGenesisPluginManager(context = {}) {
     coreApiVersion: CORE_PLUGIN_API_VERSION,
     getCapability,
     executeTool,
+    collectContext,
+    listContextProviders,
+    getUiSettings,
+    listModelProviders,
+    normalizeModelProviderConfig,
+    probeModelProvider,
+    runModelProviderAction,
+    setModelProviderSecret,
+    generateWithModelProvider,
     getCapabilityProviders: listCapabilityProviders,
     getHookRuntimeStats: () => Object.fromEntries([...hookRuntimeStatsByName.entries()].map(([name, stats]) => [name, stats])),
     initialize,

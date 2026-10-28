@@ -23,7 +23,18 @@ export function normalizeManifestPermissions(permissions = {}) {
     capabilities: normalizePermissionRules(permissions.capabilities),
     hooks: normalizePermissionRules(permissions.hooks),
     runtimeContext: normalizePermissionRules(permissions.runtimeContext),
-    tools: normalizePermissionRules(permissions.tools)
+    tools: normalizePermissionRules(permissions.tools),
+    // Core API 1.6.0, additive: off unless declared.
+    // homeView: one of the plugin's primary tabs may ask to be the host's home view.
+    homeView: permissions.homeView === true,
+    // contextProviders: provider ids the plugin may register to supply scoped
+    // notes to a host's chat or prompts. contextCollect: it may collect them.
+    contextProviders: normalizePermissionRules(permissions.contextProviders),
+    contextCollect: permissions.contextCollect === true,
+    // modelProviders: model provider type ids the plugin may register (e.g. "meterless").
+    // modelProviderUse: it may probe and generate through registered provider types.
+    modelProviders: normalizePermissionRules(permissions.modelProviders),
+    modelProviderUse: permissions.modelProviderUse === true
   };
 }
 

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { normalizeHomeView, normalizeResponsePanel } from "./ui-settings.js";
 
 const REQUIRED_PROFILE_FIELDS = [
   "id",
@@ -61,6 +62,9 @@ function deepMergeProfile(base = {}, overlay = {}) {
       ...(overlay.ui && typeof overlay.ui === "object" ? overlay.ui : {}),
       hiddenTabs: mergeStringLists(base.ui?.hiddenTabs, overlay.ui?.hiddenTabs)
     },
+    context: {
+      disabledProviders: mergeStringLists(base.context?.disabledProviders, overlay.context?.disabledProviders)
+    },
     runtime: {
       ...(base.runtime && typeof base.runtime === "object" ? base.runtime : {}),
       ...(overlay.runtime && typeof overlay.runtime === "object" ? overlay.runtime : {})
@@ -88,7 +92,15 @@ function normalizeProfile(profile = {}) {
     ui: {
       title: String(profile.ui?.title || profile.name || "Genesis").trim(),
       hiddenTabs: normalizeStringList(profile.ui?.hiddenTabs).map(normalizeId).filter(Boolean),
-      defaultTab: normalizeId(profile.ui?.defaultTab || "queue") || "queue"
+      defaultTab: normalizeId(profile.ui?.defaultTab || "queue") || "queue",
+      // A host view or "plugin:<pluginId>:<tabId>"; kept apart from defaultTab, which is
+      // normalised to a plain id and so cannot name a plugin tab (lib/ui-settings.js).
+      ...(normalizeHomeView(profile.ui?.homeView) ? { homeView: normalizeHomeView(profile.ui?.homeView) } : {}),
+      ...(profile.ui?.responsePanel ? { responsePanel: normalizeResponsePanel(profile.ui.responsePanel) } : {})
+    },
+    // Context providers switched off for this profile, as "<pluginId>:<providerId>".
+    context: {
+      disabledProviders: normalizeStringList(profile.context?.disabledProviders)
     },
     runtime: {
       ...(profile.runtime && typeof profile.runtime === "object" ? profile.runtime : {}),
@@ -331,6 +343,7 @@ export function buildPublicProfile(profile = getActiveProfile()) {
     ui: profile.ui,
     runtime: profile.runtime,
     tools: profile.tools,
+    context: profile.context,
     enabledPlugins: profile.enabledPlugins,
     disabledPlugins: profile.disabledPlugins,
     forceEnabledPlugins: profile.forceEnabledPlugins,

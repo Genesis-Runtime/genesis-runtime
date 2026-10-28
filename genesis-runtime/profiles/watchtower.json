@@ -23,6 +23,7 @@
     "workspace"
   ],
   "disabledPlugins": [
+    "operations",
     "3dpb-hub",
     "android-network-bridge",
     "autoplan",

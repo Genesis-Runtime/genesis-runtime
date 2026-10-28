@@ -1,12 +1,34 @@
 import crypto from "crypto";
 import { pathToFileURL } from "url";
+import { normalizeResponsePanel, resolveHomeView } from "./ui-settings.js";
 
-export function createNoopPluginManager({ app = null, runtimeRoot = "", loadErrors = [] } = {}) {
+export function createNoopPluginManager({ app = null, runtimeRoot = "", loadErrors = [], profile = null, defaultHomeView = "" } = {}) {
   const normalizedLoadErrors = Array.isArray(loadErrors)
     ? loadErrors.map((entry) => String(entry || "").trim()).filter(Boolean)
     : [];
+  const getUiSettings = () => {
+    const resolved = resolveHomeView({ profile, defaultHomeView });
+    return {
+      title: String(profile?.ui?.title || "Genesis").trim() || "Genesis",
+      hiddenTabs: Array.isArray(profile?.ui?.hiddenTabs) ? profile.ui.hiddenTabs.slice() : [],
+      homeView: resolved.homeView,
+      homeViewSource: resolved.source,
+      homeTab: null,
+      unavailableHomeViews: resolved.unavailable,
+      responsePanel: normalizeResponsePanel(profile?.ui?.responsePanel)
+    };
+  };
   return {
     getCapability: () => null,
+    collectContext: async ({ audience = "chat" } = {}) => ({ audience, sections: [], text: "", chars: 0, skipped: [], failures: [] }),
+    listContextProviders: () => [],
+    getUiSettings,
+    listModelProviders: () => [],
+    normalizeModelProviderConfig: async (providerId = "") => { throw new TypeError(`Unknown model provider: ${providerId}`); },
+    probeModelProvider: async () => ({ status: "offline", models: [], detail: "plugins are disabled" }),
+    runModelProviderAction: async (providerId = "") => { throw new TypeError(`Unknown model provider: ${providerId}`); },
+    setModelProviderSecret: async (providerId = "") => { throw new TypeError(`Unknown model provider: ${providerId}`); },
+    generateWithModelProvider: async (providerId = "") => { throw new TypeError(`Unknown model provider: ${providerId}`); },
     initialize: async () => {},
     listCapabilityProviders: () => [],
     listTools: () => [],
@@ -16,6 +38,9 @@ export function createNoopPluginManager({ app = null, runtimeRoot = "", loadErro
       if (!app) {
         return;
       }
+      app.get("/api/ui/settings", (_req, res) => {
+        res.json({ ok: true, ...getUiSettings() });
+      });
       app.get("/api/plugins/list", async (_req, res) => {
         res.json({
           ok: true,
@@ -288,7 +313,9 @@ export async function initializePluginManager(options = {}) {
     pluginRuntimeRoot,
     rootDir,
     runtimeContext,
-    validateAdminRequest
+    validateAdminRequest,
+    // The view a host UI opens on when nothing else chooses one (lib/ui-settings.js).
+    defaultHomeView = ""
   } = options;
 
   const pluginLoadErrors = [];
@@ -299,7 +326,7 @@ export async function initializePluginManager(options = {}) {
     const message = "plugins disabled via GENESIS_DISABLE_PLUGINS.";
     pluginLoadErrors.push(message);
     console.warn(`[genesis] ${message}`);
-    pluginManager = createNoopPluginManager({ app, runtimeRoot: pluginRuntimeRoot, loadErrors: pluginLoadErrors });
+    pluginManager = createNoopPluginManager({ app, runtimeRoot: pluginRuntimeRoot, loadErrors: pluginLoadErrors, profile, defaultHomeView });
   } else {
     const pluginManagerFactoryLoad = await loadOptionalNamedExport("./plugin-system.js", "createGenesisPluginManager");
     if (pluginManagerFactoryLoad.ok) {
@@ -313,13 +340,14 @@ export async function initializePluginManager(options = {}) {
         profile,
         hostCapabilities,
         runtimeContext,
-        validateAdminRequest
+        validateAdminRequest,
+        defaultHomeView
       });
     } else {
       const message = summarizeOptionalModuleLoadError(pluginManagerFactoryLoad.error, "./plugin-system.js");
       pluginLoadErrors.push(message);
       console.warn(`[genesis] ${message}`);
-      pluginManager = createNoopPluginManager({ app, runtimeRoot: pluginRuntimeRoot, loadErrors: pluginLoadErrors });
+      pluginManager = createNoopPluginManager({ app, runtimeRoot: pluginRuntimeRoot, loadErrors: pluginLoadErrors, profile, defaultHomeView });
     }
   }
 
@@ -420,7 +448,7 @@ export async function initializePluginManager(options = {}) {
     const message = `plugin initialization failed: ${String(error?.message || error || "unknown error")}`;
     pluginLoadErrors.push(message);
     console.warn(`[genesis] ${message}`);
-    pluginManager = createNoopPluginManager({ app, runtimeRoot: pluginRuntimeRoot, loadErrors: pluginLoadErrors });
+    pluginManager = createNoopPluginManager({ app, runtimeRoot: pluginRuntimeRoot, loadErrors: pluginLoadErrors, profile, defaultHomeView });
   }
 
   return { pluginLoadErrors, pluginManager };

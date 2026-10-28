@@ -116,7 +116,7 @@ test("a plugin's declared topics are normalised and reported with its manifest",
   }));
   await manager.initialize();
   const [plugin] = manager.listPlugins();
-  assert.equal(plugin.coreApiVersion, "1.5.0");
+  assert.equal(plugin.coreApiVersion, "1.6.0");
   assert.deepEqual(plugin.manifest.topics, { keywords: ["LinkedIn", "Reddit"], examples: ["Draft a post for LinkedIn"] });
   await manager.shutdown();
 });

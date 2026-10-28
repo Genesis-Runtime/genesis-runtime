@@ -31,6 +31,7 @@
     "workspace"
   ],
   "disabledPlugins": [
+    "operations",
     "3dpb-hub",
     "browser",
     "code-review",

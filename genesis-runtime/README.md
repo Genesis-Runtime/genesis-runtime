@@ -5,7 +5,7 @@ infrastructure only — behaviour comes from plugins. See the Genesis Core Extra
 and `../genesis-core/docs/GENESIS-EXTRACTION-CLASSIFICATION.md` for the full extraction plan
 this package implements.
 
-## Reusable host API (0.4)
+## Reusable host API (1.6)
 
 Genesis can be embedded by host applications instead of only running
 `server.js`. Exported subpaths provide the plugin loader, plugin system, profile manager, admin
@@ -27,6 +27,30 @@ it covers (up to 24 keywords) and requests it serves (up to 12 examples). The fi
 rest of the manifest and reported through `listPlugins()` in each plugin's `manifest`. A host can use it to
 choose when to offer the plugin's tools, for example by matching incoming messages against it.
 Topics grant nothing: permissions, capabilities and tool registration are unchanged.
+
+Version 0.5 keeps core free of a scheduler. Queue-backed scheduling belongs to the
+agent runtime plugin; operations packs register jobs there and execute through its
+task queue. Workspace operation packs use the sandbox plugin's configured
+workspace, input, and output roots.
+Set `GENESIS_OPERATIONS_TIMEZONE` to an IANA zone (for example,
+`Australia/Sydney`) when the operations process runs outside the operator's
+local timezone. A pack can override it with `schedule.timeZone`.
+
+Version 1.6 (core plugin API 1.6.0) adds four extension points hosts used to patch in
+themselves. Each is additive and needs its own manifest permission:
+
+- **Home view.** `GENESIS_HOME_VIEW`, `profile.ui.homeView`, or a plugin tab registered with
+  `home: true` chooses the view a host UI opens on. Hosts read it from `GET /api/ui/settings`.
+- **Reply panel.** `profile.ui.responsePanel` settings and `createCollapsible` from
+  `observer-compat/browser/collapsible.js` make a host's reply box collapsible.
+- **Scoped context providers.** `api.registerContextProvider(...)` lets a plugin supply notes about
+  its own data, and `pluginManager.collectContext({ message })` gathers only those the message is
+  in scope for.
+- **Model provider types.** `api.registerModelProvider(...)` adds a kind of model endpoint (its
+  editor fields, secrets, probe and `generate`), which hosts list with `listModelProviders()` and
+  call with `generateWithModelProvider(...)`. The catalog's `meterless` plugin is the first.
+
+See `docs/plugin-api-1.6.md`.
 
 ## What's here
 
@@ -74,7 +98,7 @@ Profiles aren't sample config — they're the unit you install, activate, and fo
 locally into `plugins/_catalog/` where you're expected to edit it. See "CLI" below for the
 `genesis` command that drives this.
 
-Eight profiles ship in `profiles/`, all validated against the 46-plugin `genesis-plugins` catalog (boots clean, 0 load errors):
+Eight profiles ship in `profiles/` for the external `genesis-plugins` catalog:
 
 | Profile | `genesis create <id>` | Enables |
 |---|---|---|
@@ -82,7 +106,7 @@ Eight profiles ship in `profiles/`, all validated against the 46-plugin `genesis
 | Minimal | `minimal` | `secrets`, `model-provider` only — verify the runtime boots before adding anything |
 | Home | `home` | agent-runtime, memory, mail, calendar, voice/avatar, presence, home automation (Home Assistant/Matter/MQTT), skills, philosophy/personality — no dev or business tooling |
 | Developer | `developer` | agent-runtime, sandbox, workspace, code-review, deploy, github, qa, security-audit, vscode bridge, sprint/design tooling |
-| Startup | `startup` | agent-runtime, finance, projects, sprint, mail/calendar, github, social-media-manager, governance, information-agent — running-the-business tooling, not writing-the-code tooling |
+| Startup | `startup` | agent-runtime, operations, finance, projects, sprint, mail/calendar, github, social-media-manager, governance, information-agent |
 | Ghostwriter | `ghostwriter` | personality/personality-clone, philosophy, projects (writing fragments), retrieval, social-media-manager — persona and content work |
 | Watchtower | `watchtower` | security, security-audit, governance, qa, code-review, deploy, developer-tools, browser, information-agent — security/CI/external-monitoring watch |
 | Full Catalog | `full` | everything — for integration testing, not a real deployment (broad tool/capability surface) |
@@ -140,7 +164,8 @@ Pass `--source git` or `--source local` to force one strategy for every plugin i
 
 Local-catalog installs are copied — not symlinked — into `plugins/_catalog/`, following each
 plugin's actual local import graph (so two plugins sharing a directory, like
-`iot-matter`/`iot-mqtt`, don't drag each other in) plus its `public/`/`vendor/` asset folders when
+`iot-matter`/`iot-mqtt`, don't drag each other in) plus its `public/`, `vendor/`,
+`packs/`, and `reference-kits/` asset folders when
 it owns them outright. Installs over ~25MB from a local catalog (e.g. `multilingual-voice`'s
 bundled whisper/ffmpeg binaries) require `--yes` to proceed, since that's easy to trigger by
 accident via a profile that just lists the plugin id.

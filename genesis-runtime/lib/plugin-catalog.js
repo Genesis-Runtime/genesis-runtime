@@ -141,7 +141,7 @@ async function listDirectoryRecursive({ dir, fs, pathModule, out }) {
  * on disk is reported back instead of silently dropped.
  *
  * If the entry module lives in a directory no other catalog plugin also lives in, that
- * directory's public/ and vendor/ subfolders (if present) are copied wholesale too, since
+ * directory's public/, vendor/, packs/, and reference-kits/ subfolders (if present) are copied wholesale too, since
  * runtime assets in there (UI bundles, model binaries) are typically referenced by path at
  * runtime rather than imported.
  */
@@ -191,7 +191,7 @@ export async function resolveInstallSet({ id, catalogIndex, fs, pathModule = pat
   );
   const assetFiles = new Set();
   if (!ownedByOtherPlugin && entry.dir !== catalogIndex.root) {
-    for (const assetDirName of ["public", "vendor"]) {
+    for (const assetDirName of ["public", "vendor", "packs", "reference-kits"]) {
       const collected = [];
       await listDirectoryRecursive({ dir: pathModule.join(entry.dir, assetDirName), fs, pathModule, out: collected });
       for (const file of collected) assetFiles.add(file);
